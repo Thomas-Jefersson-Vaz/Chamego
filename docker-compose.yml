@@ -6,7 +6,7 @@ services:
     ports:
       - "34343:34343"
     env_file:
-      - .env
+      - stack.env
     # Se você quiser usar o banco de dados do docker abaixo, descomente a linha 'depends_on'
     # depends_on:
     #   - postgres
