@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    container_name: chamego_api
+    restart: always
+    ports:
+      - "34343:34343"
+    env_file:
+      - .env
+    # Se você quiser usar o banco de dados do docker abaixo, descomente a linha 'depends_on'
+    # depends_on:
+    #   - postgres
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: chamego_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: chamego_user
+      POSTGRES_PASSWORD: chamego_password
+      POSTGRES_DB: chamego_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
