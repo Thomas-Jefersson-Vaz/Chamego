@@ -11,18 +11,18 @@ services:
     # depends_on:
     #   - postgres
 
-  postgres:
-    image: postgres:15-alpine
-    container_name: chamego_postgres
-    restart: always
-    environment:
-      POSTGRES_USER: chamego_user
-      POSTGRES_PASSWORD: chamego_password
-      POSTGRES_DB: chamego_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    #   postgres:
+    #     image: postgres:15-alpine
+    #     container_name: chamego_postgres
+    #     restart: always
+    #     environment:
+    #       POSTGRES_USER: chamego_user
+    #       POSTGRES_PASSWORD: chamego_password
+    #       POSTGRES_DB: chamego_db
+    #     ports:
+    #       - "5432:5432"
+    #     volumes:
+    #       - postgres_data:/var/lib/postgresql/data
 
-volumes:
-  postgres_data:
+    # volumes:
+    #   postgres_data:
