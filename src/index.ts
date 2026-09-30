@@ -432,6 +432,39 @@ app.post('/api/couples/pair', authenticateToken, async (req: AuthRequest, res: R
   }
 });
 
+// POST /api/couples/start-date (Bearer Token Required)
+app.post('/api/couples/start-date', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  const { start_date } = req.body;
+  const userId = req.user!.id;
+  log.info('COUPLE', `Atualizando data de início do casal pelo usuário ${userId}`, { start_date });
+
+  if (!start_date) {
+    res.status(400).json({ error: 'start_date é obrigatório.', message: 'start_date é obrigatório.' });
+    return;
+  }
+
+  try {
+    const userRes = await pool.query('SELECT couple_id FROM users WHERE id = $1', [userId]);
+    const coupleId = userRes.rows[0]?.couple_id;
+
+    if (!coupleId) {
+      res.status(400).json({ error: 'Usuário não possui casal associado.', message: 'Usuário não possui casal associado.' });
+      return;
+    }
+
+    await pool.query(
+      'UPDATE couples SET start_date = $1, updated_at = NOW() WHERE id = $2',
+      [start_date, coupleId]
+    );
+
+    log.success('COUPLE', `Data de início do casal atualizada com sucesso para ${start_date}`);
+    res.status(200).json({ status: 'success', start_date });
+  } catch (error: any) {
+    log.error('COUPLE', 'Erro ao atualizar data de início', error);
+    res.status(500).json({ error: 'Erro ao atualizar data de início do casal.', message: 'Erro ao atualizar data de início do casal.' });
+  }
+});
+
 // Handler compartilhado para atualização de tipo de relacionamento (suporta /api/users/... e /api/couples/...)
 const handleRelationshipType = async (req: AuthRequest, res: Response): Promise<void> => {
   const { relationship_type } = req.body;
@@ -660,6 +693,10 @@ app.post('/api/sync', authenticateToken, async (req: AuthRequest, res: Response)
     }
 
     // ── Fetch remote updates since last sync ──
+    const syncSince = (last_synced_at && typeof last_synced_at === 'string' && last_synced_at.trim().length > 0)
+      ? last_synced_at
+      : '1970-01-01T00:00:00.000Z';
+
     const remote_updates: Record<string, any> = {
       couple: null,
       users: [],
@@ -671,33 +708,41 @@ app.post('/api/sync', authenticateToken, async (req: AuthRequest, res: Response)
     };
 
     if (coupleId) {
+      // Upsert start_date if sent in unsynced couple
+      if (unsynced?.couple?.start_date) {
+        await pool.query(
+          'UPDATE couples SET start_date = $1, updated_at = NOW() WHERE id = $2',
+          [unsynced.couple.start_date, coupleId]
+        );
+      }
+
       const chamegos = await pool.query(
         'SELECT * FROM chamegos WHERE couple_id = $1 AND created_at > $2',
-        [coupleId, last_synced_at]
+        [coupleId, syncSince]
       );
       remote_updates.chamegos = chamegos.rows;
 
       const outings = await pool.query(
         'SELECT * FROM outings WHERE couple_id = $1 AND updated_at > $2',
-        [coupleId, last_synced_at]
+        [coupleId, syncSince]
       );
       remote_updates.outings = outings.rows;
 
       const memories = await pool.query(
         'SELECT * FROM memories WHERE couple_id = $1 AND updated_at > $2',
-        [coupleId, last_synced_at]
+        [coupleId, syncSince]
       );
       remote_updates.memories = memories.rows;
 
       const gifts = await pool.query(
         'SELECT * FROM gifts WHERE couple_id = $1 AND updated_at > $2',
-        [coupleId, last_synced_at]
+        [coupleId, syncSince]
       );
       remote_updates.gifts = gifts.rows;
 
       const special_dates = await pool.query(
         'SELECT * FROM special_dates WHERE couple_id = $1 AND updated_at > $2',
-        [coupleId, last_synced_at]
+        [coupleId, syncSince]
       );
       remote_updates.special_dates = special_dates.rows;
 
