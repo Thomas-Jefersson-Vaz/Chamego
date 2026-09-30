@@ -120,8 +120,39 @@ function authenticateToken(req: AuthRequest, res: Response, next: NextFunction):
 }
 
 // ──────────────────────────────────────────────
-// Auth Routes
+// System & Health Routes
 // ──────────────────────────────────────────────
+app.get(['/health', '/api/health'], (_req: Request, res: Response): void => {
+  res.status(200).json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ──────────────────────────────────────────────
+// Auth & Profile Routes
+// ──────────────────────────────────────────────
+
+// GET /api/users/me (Bearer Token Required)
+app.get('/api/users/me', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.id;
+  try {
+    const result = await pool.query(
+      'SELECT id, name, email, couple_id, relationship_type, created_at, updated_at FROM users WHERE id = $1',
+      [userId]
+    );
+    const user = result.rows[0];
+    if (!user) {
+      res.status(404).json({ error: 'Usuário não encontrado.', message: 'Usuário não encontrado.' });
+      return;
+    }
+    res.status(200).json({ user });
+  } catch (error: any) {
+    log.error('USER', `Erro ao buscar dados do usuário ${userId}`, error);
+    res.status(500).json({ error: 'Erro interno ao obter perfil.', message: 'Erro interno ao obter perfil.' });
+  }
+});
 
 // POST /api/auth/register
 app.post('/api/auth/register', async (req: Request, res: Response): Promise<void> => {
@@ -134,23 +165,35 @@ app.post('/api/auth/register', async (req: Request, res: Response): Promise<void
     return;
   }
 
+  const cleanEmail = email.trim().toLowerCase();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(cleanEmail)) {
+    res.status(400).json({ error: 'Formato de e-mail inválido.', message: 'Formato de e-mail inválido.' });
+    return;
+  }
+
+  if (password.length < 6) {
+    res.status(400).json({ error: 'A senha deve ter pelo menos 6 caracteres.', message: 'A senha deve ter pelo menos 6 caracteres.' });
+    return;
+  }
+
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    log.info('REGISTER', `Senha hash gerada para ${email}`);
+    log.info('REGISTER', `Senha hash gerada para ${cleanEmail}`);
 
     const result = await pool.query(
       `INSERT INTO users (name, email, password_hash)
        VALUES ($1, $2, $3)
        RETURNING id, name, email, couple_id, relationship_type, created_at, updated_at`,
-      [name, email, hashedPassword]
+      [name.trim(), cleanEmail, hashedPassword]
     );
     const user = result.rows[0];
-    const token = jwt.sign({ id: user.id }, JWT_SECRET);
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '30d' });
 
     log.success('REGISTER', `Usuário criado com sucesso`, { id: user.id, email: user.email });
     res.status(201).json({ user, token });
   } catch (error: any) {
-    log.error('REGISTER', `Falha ao registrar ${email}`, error);
+    log.error('REGISTER', `Falha ao registrar ${cleanEmail}`, error);
     if (error.code === '23505') {
       res.status(409).json({ error: 'Este e-mail já está cadastrado.', message: 'Este e-mail já está cadastrado.' });
     } else {
@@ -162,16 +205,22 @@ app.post('/api/auth/register', async (req: Request, res: Response): Promise<void
 // POST /api/auth/login
 app.post('/api/auth/login', async (req: Request, res: Response): Promise<void> => {
   const { email, password } = req.body;
-  log.info('LOGIN', `Tentativa de login: ${email}`);
+  const cleanEmail = (email || '').trim().toLowerCase();
+  log.info('LOGIN', `Tentativa de login: ${cleanEmail}`);
+
+  if (!cleanEmail || !password) {
+    res.status(400).json({ error: 'E-mail e senha são obrigatórios.', message: 'E-mail e senha são obrigatórios.' });
+    return;
+  }
 
   try {
     const result = await pool.query(
       'SELECT id, name, email, couple_id, relationship_type, password_hash, created_at, updated_at FROM users WHERE email = $1',
-      [email]
+      [cleanEmail]
     );
     const user = result.rows[0];
     if (!user) {
-      log.warn('LOGIN', `Usuário não encontrado: ${email}`);
+      log.warn('LOGIN', `Usuário não encontrado: ${cleanEmail}`);
       res.status(401).json({ error: 'E-mail ou senha incorretos.', message: 'E-mail ou senha incorretos.' });
       return;
     }
@@ -179,18 +228,18 @@ app.post('/api/auth/login', async (req: Request, res: Response): Promise<void> =
     log.info('LOGIN', `Usuário encontrado: ${user.id}, verificando senha...`);
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) {
-      log.warn('LOGIN', `Senha incorreta para ${email}`);
+      log.warn('LOGIN', `Senha incorreta para ${cleanEmail}`);
       res.status(401).json({ error: 'E-mail ou senha incorretos.', message: 'E-mail ou senha incorretos.' });
       return;
     }
-    const token = jwt.sign({ id: user.id }, JWT_SECRET);
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '30d' });
 
     // Omit password_hash from response
     const { password_hash: _, ...safeUser } = user;
-    log.success('LOGIN', `Login bem-sucedido`, { id: user.id, email });
+    log.success('LOGIN', `Login bem-sucedido`, { id: user.id, email: cleanEmail });
     res.status(200).json({ user: safeUser, token });
   } catch (error: any) {
-    log.error('LOGIN', `Erro no login de ${email}`, error);
+    log.error('LOGIN', `Erro no login de ${cleanEmail}`, error);
     res.status(500).json({ error: 'Erro interno ao fazer login. Tente novamente mais tarde.', message: 'Erro interno ao fazer login. Tente novamente mais tarde.' });
   }
 });
@@ -753,7 +802,7 @@ io.on('connection', (socket: Socket) => {
 });
 
 // ──────────────────────────────────────────────
-// Start Server
+// Start Server & Graceful Shutdown
 // ──────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 
@@ -762,3 +811,19 @@ server.listen(PORT, async () => {
   log.info('SERVER', `Ambiente: DATABASE_URL=${process.env.DATABASE_URL ? '✔ definido' : '✖ ausente'}, JWT_SECRET=${process.env.JWT_SECRET ? '✔ definido' : '✖ ausente'}`);
   await initDb();
 });
+
+const gracefulShutdown = async (signal: string) => {
+  log.info('SERVER', `Sinal de encerramento recebido (${signal}). Finalizando conexões...`);
+  server.close(async () => {
+    try {
+      await pool.end();
+      log.success('SERVER', 'Pool do banco de dados e servidor HTTP finalizados com sucesso.');
+    } catch (err) {
+      log.error('SERVER', 'Erro ao fechar conexões do banco de dados', err);
+    }
+    process.exit(0);
+  });
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
