@@ -363,8 +363,12 @@ app.post('/api/couples/pair', authenticateToken, async (req: AuthRequest, res: R
         await pool.query('COMMIT');
         log.success('PAIR', `Usuário ${userId} pareado com sucesso ao couple ${couple.id}`);
 
-        // Notificar via WebSocket na sala do casal e no canal individual do user1
-        io.to(`couple:${couple.id}`).emit('partner_joined', {
+        // Notificar via WebSocket na sala do casal e no canal individual do user1, e juntar sockets à sala do casal
+        const roomName = `couple:${couple.id}`;
+        io.in(`user:${couple.user1_id}`).socketsJoin(roomName);
+        io.in(`user:${userId}`).socketsJoin(roomName);
+
+        io.to(roomName).emit('partner_joined', {
           couple_id: couple.id,
           partner_id: userId,
           partner_name: currentUserName,
@@ -492,8 +496,11 @@ app.post('/api/notifications/emote', authenticateToken, async (req: AuthRequest,
       log.info('EMOTE', `Parceiro identificado: ${partnerId}`);
 
       // 3. Broadcast real-time emote_received event via WebSocket to the couple room
-      io.to(`couple:${couple_id}`).emit('emote_received', {
-        event: 'emote_received',
+      io.to(`couple:${couple_id}`).emit('receive_emote', {
+        event: 'receive_emote',
+        id: req.body.id || undefined,
+        couple_id,
+        sender_id,
         sender_name,
         emote,
         text,
@@ -780,14 +787,26 @@ io.on('connection', (socket: Socket) => {
     }
   })();
 
-  // 3. Handle send_emote event
-  socket.on('send_emote', (data: { couple_id: string; sender_name: string; emote: string; text: string }) => {
-    const { couple_id, sender_name, emote, text } = data;
-    log.ws(`Emote recebido via WS de ${sender_name}`, { couple_id, emote, text });
+  // 3. Handle explicit join_couple event
+  socket.on('join_couple', (data: { couple_id: string }) => {
+    if (data?.couple_id) {
+      socket.join(`couple:${data.couple_id}`);
+      log.ws(`Socket ${socket.id} (user ${userId}) entrou manualmente na sala couple:${data.couple_id}`);
+    }
+  });
 
-    // 4. Broadcast receive_emote to all OTHER sockets in the couple room
+  // 4. Handle send_emote event
+  socket.on('send_emote', (data: { id?: string; couple_id: string; sender_id?: string; sender_name: string; emote: string; text: string }) => {
+    const { id, couple_id, sender_id, sender_name, emote, text } = data;
+    const effectiveSenderId = sender_id || userId;
+    log.ws(`Emote recebido via WS de ${sender_name}`, { couple_id, sender_id: effectiveSenderId, emote, text });
+
+    // Broadcast receive_emote to all OTHER sockets in the couple room
     socket.to(`couple:${couple_id}`).emit('receive_emote', {
       event: 'receive_emote',
+      id: id || undefined,
+      couple_id,
+      sender_id: effectiveSenderId,
       sender_name,
       emote,
       text,
