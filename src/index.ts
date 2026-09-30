@@ -130,7 +130,7 @@ app.post('/api/auth/register', async (req: Request, res: Response): Promise<void
 
   if (!name || !email || !password) {
     log.warn('REGISTER', 'Campos obrigatórios ausentes', { name: !!name, email: !!email, password: !!password });
-    res.status(400).json({ error: 'name, email e password são obrigatórios' });
+    res.status(400).json({ error: 'name, email e password são obrigatórios', message: 'name, email e password são obrigatórios' });
     return;
   }
 
@@ -152,9 +152,9 @@ app.post('/api/auth/register', async (req: Request, res: Response): Promise<void
   } catch (error: any) {
     log.error('REGISTER', `Falha ao registrar ${email}`, error);
     if (error.code === '23505') {
-      res.status(409).json({ error: 'Este e-mail já está cadastrado.' });
+      res.status(409).json({ error: 'Este e-mail já está cadastrado.', message: 'Este e-mail já está cadastrado.' });
     } else {
-      res.status(500).json({ error: 'Erro interno ao criar conta. Tente novamente mais tarde.' });
+      res.status(500).json({ error: 'Erro interno ao criar conta. Tente novamente mais tarde.', message: 'Erro interno ao criar conta. Tente novamente mais tarde.' });
     }
   }
 });
@@ -172,7 +172,7 @@ app.post('/api/auth/login', async (req: Request, res: Response): Promise<void> =
     const user = result.rows[0];
     if (!user) {
       log.warn('LOGIN', `Usuário não encontrado: ${email}`);
-      res.status(401).json({ error: 'E-mail ou senha incorretos.' });
+      res.status(401).json({ error: 'E-mail ou senha incorretos.', message: 'E-mail ou senha incorretos.' });
       return;
     }
 
@@ -180,7 +180,7 @@ app.post('/api/auth/login', async (req: Request, res: Response): Promise<void> =
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) {
       log.warn('LOGIN', `Senha incorreta para ${email}`);
-      res.status(401).json({ error: 'E-mail ou senha incorretos.' });
+      res.status(401).json({ error: 'E-mail ou senha incorretos.', message: 'E-mail ou senha incorretos.' });
       return;
     }
     const token = jwt.sign({ id: user.id }, JWT_SECRET);
@@ -191,13 +191,62 @@ app.post('/api/auth/login', async (req: Request, res: Response): Promise<void> =
     res.status(200).json({ user: safeUser, token });
   } catch (error: any) {
     log.error('LOGIN', `Erro no login de ${email}`, error);
-    res.status(500).json({ error: 'Erro interno ao fazer login. Tente novamente mais tarde.' });
+    res.status(500).json({ error: 'Erro interno ao fazer login. Tente novamente mais tarde.', message: 'Erro interno ao fazer login. Tente novamente mais tarde.' });
   }
 });
 
 // ──────────────────────────────────────────────
-// Couples Pairing
+// Couples Pairing & Profile
 // ──────────────────────────────────────────────
+
+// GET /api/couples/me (Bearer Token Required)
+app.get('/api/couples/me', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.id;
+  try {
+    const userRes = await pool.query('SELECT couple_id FROM users WHERE id = $1', [userId]);
+    const coupleId = userRes.rows[0]?.couple_id;
+
+    if (!coupleId) {
+      res.status(200).json({ couple: null, partner: null });
+      return;
+    }
+
+    const coupleRes = await pool.query('SELECT * FROM couples WHERE id = $1', [coupleId]);
+    const couple = coupleRes.rows[0];
+
+    if (!couple) {
+      res.status(200).json({ couple: null, partner: null });
+      return;
+    }
+
+    const partnerId = couple.user1_id === userId ? couple.user2_id : couple.user1_id;
+    let partnerName: string | null = null;
+    let partnerUser: any = null;
+
+    if (partnerId) {
+      const partnerRes = await pool.query(
+        'SELECT id, name, email, relationship_type, created_at FROM users WHERE id = $1',
+        [partnerId]
+      );
+      partnerUser = partnerRes.rows[0] || null;
+      partnerName = partnerUser?.name || null;
+    }
+
+    res.status(200).json({
+      couple: {
+        ...couple,
+        partner_name: partnerName,
+      },
+      partner: partnerUser,
+    });
+  } catch (error: any) {
+    log.error('COUPLE', `Erro ao buscar casal do usuário ${userId}`, error);
+    res.status(500).json({
+      error: 'Erro ao obter dados do casal.',
+      message: 'Erro ao obter dados do casal.',
+    });
+  }
+});
 
 // POST /api/couples/pair  (Bearer Token Required)
 app.post('/api/couples/pair', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
@@ -205,17 +254,50 @@ app.post('/api/couples/pair', authenticateToken, async (req: AuthRequest, res: R
   const userId = req.user!.id;
   log.info('PAIR', `Usuário ${userId} tentando parear com código: ${code}`);
 
+  if (!code || typeof code !== 'string') {
+    res.status(400).json({
+      error: 'Código de pareamento obrigatório.',
+      message: 'Código de pareamento obrigatório.',
+    });
+    return;
+  }
+
+  const cleanCode = code.trim().toUpperCase();
+
   try {
     await pool.query('BEGIN');
 
-    // Check if code already exists
-    let coupleResult = await pool.query('SELECT * FROM couples WHERE code = $1', [code]);
+    // Buscar nome do usuário atual
+    const currentUserRes = await pool.query('SELECT name FROM users WHERE id = $1', [userId]);
+    const currentUserName = currentUserRes.rows[0]?.name || 'Amor';
+
+    // Verificar se o código já existe
+    let coupleResult = await pool.query('SELECT * FROM couples WHERE code = $1', [cleanCode]);
     let couple = coupleResult.rows[0];
 
     if (couple) {
-      log.info('PAIR', `Código ${code} já existe (couple_id: ${couple.id}), user1: ${couple.user1_id}, user2: ${couple.user2_id}`);
-      // Join existing couple as user2
-      if (!couple.user2_id && couple.user1_id !== userId) {
+      log.info('PAIR', `Código ${cleanCode} já existe (couple_id: ${couple.id}), user1: ${couple.user1_id}, user2: ${couple.user2_id}`);
+
+      // Se o usuário já faz parte deste casal, retornar dados com o partner_name resolvido
+      if (couple.user1_id === userId || couple.user2_id === userId) {
+        await pool.query('COMMIT');
+        const partnerId = couple.user1_id === userId ? couple.user2_id : couple.user1_id;
+        let partnerName: string | null = null;
+        if (partnerId) {
+          const partnerRes = await pool.query('SELECT name FROM users WHERE id = $1', [partnerId]);
+          partnerName = partnerRes.rows[0]?.name || null;
+        }
+        res.status(200).json({
+          couple: {
+            ...couple,
+            partner_name: partnerName,
+          },
+        });
+        return;
+      }
+
+      // Juntar-se ao casal existente como user2
+      if (!couple.user2_id) {
         await pool.query(
           'UPDATE couples SET user2_id = $1, updated_at = NOW() WHERE id = $2',
           [userId, couple.id]
@@ -224,46 +306,90 @@ app.post('/api/couples/pair', authenticateToken, async (req: AuthRequest, res: R
 
         coupleResult = await pool.query('SELECT * FROM couples WHERE id = $1', [couple.id]);
         couple = coupleResult.rows[0];
+
+        // Obter nome do user1 para passar ao user2 como partner_name
+        const user1Res = await pool.query('SELECT name FROM users WHERE id = $1', [couple.user1_id]);
+        const user1Name = user1Res.rows[0]?.name || 'Amor';
+
+        await pool.query('COMMIT');
         log.success('PAIR', `Usuário ${userId} pareado com sucesso ao couple ${couple.id}`);
+
+        // Notificar via WebSocket na sala do casal e no canal individual do user1
+        io.to(`couple:${couple.id}`).emit('partner_joined', {
+          couple_id: couple.id,
+          partner_id: userId,
+          partner_name: currentUserName,
+        });
+        io.to(`user:${couple.user1_id}`).emit('partner_joined', {
+          couple_id: couple.id,
+          partner_id: userId,
+          partner_name: currentUserName,
+        });
+
+        res.status(200).json({
+          couple: {
+            ...couple,
+            partner_name: user1Name,
+          },
+        });
+        return;
       } else {
         await pool.query('ROLLBACK');
-        log.warn('PAIR', `Casal já completo ou operação inválida para código ${code}`);
-        res.status(400).json({ error: 'Este código é inválido ou o casal já está completo.' });
+        log.warn('PAIR', `Casal já completo ou operação inválida para código ${cleanCode}`);
+        res.status(400).json({
+          error: 'Este código é inválido ou o casal já está completo.',
+          message: 'Este código é inválido ou o casal já está completo.',
+        });
         return;
       }
     } else {
-      // Create new couple with this user as user1
-      log.info('PAIR', `Criando novo casal com código ${code}, user1: ${userId}`);
+      // Criar novo casal com este usuário como user1
+      log.info('PAIR', `Criando novo casal com código ${cleanCode}, user1: ${userId}`);
       coupleResult = await pool.query(
         'INSERT INTO couples (code, user1_id, start_date) VALUES ($1, $2, NOW()) RETURNING *',
-        [code, userId]
+        [cleanCode, userId]
       );
       couple = coupleResult.rows[0];
       await pool.query('UPDATE users SET couple_id = $1, updated_at = NOW() WHERE id = $2', [couple.id, userId]);
-      log.success('PAIR', `Novo casal criado`, { coupleId: couple.id, code });
-    }
+      await pool.query('COMMIT');
+      log.success('PAIR', `Novo casal criado`, { coupleId: couple.id, code: cleanCode });
 
-    await pool.query('COMMIT');
-    res.status(200).json({ couple });
+      res.status(200).json({
+        couple: {
+          ...couple,
+          partner_name: null,
+        },
+      });
+      return;
+    }
   } catch (error: any) {
     await pool.query('ROLLBACK');
-    log.error('PAIR', `Erro ao parear usuário ${userId} com código ${code}`, error);
+    log.error('PAIR', `Erro ao parear usuário ${userId} com código ${cleanCode}`, error);
     if (error.code === '23505') {
-      res.status(409).json({ error: 'Este código já está em uso, tente outro.' });
+      res.status(409).json({
+        error: 'Este código já está em uso, tente outro.',
+        message: 'Este código já está em uso, tente outro.',
+      });
     } else {
-      res.status(500).json({ error: 'Não foi possível completar o pareamento. Tente novamente mais tarde.' });
+      res.status(500).json({
+        error: 'Não foi possível completar o pareamento. Tente novamente mais tarde.',
+        message: 'Não foi possível completar o pareamento. Tente novamente mais tarde.',
+      });
     }
   }
 });
 
-// POST /api/users/relationship-type (Bearer Token Required)
-app.post('/api/users/relationship-type', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+// Handler compartilhado para atualização de tipo de relacionamento (suporta /api/users/... e /api/couples/...)
+const handleRelationshipType = async (req: AuthRequest, res: Response): Promise<void> => {
   const { relationship_type } = req.body;
   const userId = req.user!.id;
   log.info('USER', `Atualizando tipo de relacionamento para ${relationship_type} (usuário: ${userId})`);
 
   if (!['Monogâmico(a)', 'Bi-amoroso(a)', 'Poliamoroso(a)'].includes(relationship_type)) {
-    res.status(400).json({ error: 'Tipo de relacionamento inválido.' });
+    res.status(400).json({
+      error: 'Tipo de relacionamento inválido.',
+      message: 'Tipo de relacionamento inválido.',
+    });
     return;
   }
 
@@ -280,9 +406,15 @@ app.post('/api/users/relationship-type', authenticateToken, async (req: AuthRequ
     });
   } catch (error: any) {
     log.error('USER', `Erro ao atualizar tipo de relacionamento`, error);
-    res.status(500).json({ error: 'Erro ao atualizar o tipo de relacionamento.' });
+    res.status(500).json({
+      error: 'Erro ao atualizar o tipo de relacionamento.',
+      message: 'Erro ao atualizar o tipo de relacionamento.',
+    });
   }
-});
+};
+
+app.post('/api/users/relationship-type', authenticateToken, handleRelationshipType);
+app.post('/api/couples/relationship-type', authenticateToken, handleRelationshipType);
 
 // ──────────────────────────────────────────────
 // Real-Time Emote Notification
@@ -517,7 +649,19 @@ app.post('/api/sync', authenticateToken, async (req: AuthRequest, res: Response)
         'SELECT * FROM couples WHERE id = $1',
         [coupleId]
       );
-      remote_updates.couple = coupleResult.rows[0];
+      if (coupleResult.rows.length > 0) {
+        const c = coupleResult.rows[0];
+        const partnerId = c.user1_id === userId ? c.user2_id : c.user1_id;
+        let partnerName: string | null = null;
+        if (partnerId) {
+          const partnerRes = await pool.query('SELECT name FROM users WHERE id = $1', [partnerId]);
+          partnerName = partnerRes.rows[0]?.name || null;
+        }
+        remote_updates.couple = {
+          ...c,
+          partner_name: partnerName,
+        };
+      }
 
       const usersResult = await pool.query(
         'SELECT id, name, email, couple_id, relationship_type, created_at, updated_at FROM users WHERE couple_id = $1',
@@ -543,7 +687,10 @@ app.post('/api/sync', authenticateToken, async (req: AuthRequest, res: Response)
     });
   } catch (error: any) {
     log.error('SYNC', `Erro no sync do usuário ${userId}`, error);
-    res.status(500).json({ error: 'Houve um erro ao sincronizar os dados. Tentaremos novamente em breve.' });
+    res.status(500).json({
+      error: 'Houve um erro ao sincronizar os dados. Tentaremos novamente em breve.',
+      message: 'Houve um erro ao sincronizar os dados. Tentaremos novamente em breve.',
+    });
   }
 });
 
@@ -560,7 +707,8 @@ io.on('connection', (socket: Socket) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { id: string };
     userId = decoded.id;
-    log.ws(`Usuário ${userId} autenticado via WebSocket`);
+    socket.join(`user:${userId}`);
+    log.ws(`Usuário ${userId} autenticado via WebSocket e registrado na sala user:${userId}`);
   } catch (err) {
     log.warn('WS', `Autenticação falhou, desconectando socket ${socket.id}`, err);
     socket.disconnect();
