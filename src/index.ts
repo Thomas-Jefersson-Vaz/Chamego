@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { pool, initDb } from './db';
+import { registerCrudRoutes } from './crud';
 
 dotenv.config();
 
@@ -794,6 +795,11 @@ app.post('/api/sync', authenticateToken, async (req: AuthRequest, res: Response)
     });
   }
 });
+
+// ──────────────────────────────────────────────
+// REST CRUD: outings, memories, gifts, special-dates
+// ──────────────────────────────────────────────
+registerCrudRoutes(app, pool, authenticateToken as any);
 
 // ──────────────────────────────────────────────
 // WebSocket Gateway  (ws://<host>:3000/ws)
