@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { pool, initDb } from './db';
+import { registerCrudRoutes } from './crud';
+import { initFcm, sendPushToUser } from './fcm';
 
 dotenv.config();
 
@@ -506,65 +508,114 @@ app.post('/api/couples/relationship-type', authenticateToken, handleRelationship
 // Real-Time Emote Notification
 // ──────────────────────────────────────────────
 
-// POST /api/notifications/emote  (Bearer Token Required)
-app.post('/api/notifications/emote', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
-  const { couple_id, sender_id, sender_name, emote, text, timestamp: ts } = req.body;
-  log.info('EMOTE', `Emote recebido de ${sender_name} (${sender_id})`, { couple_id, emote, text });
+// POST /api/users/fcm-token  (Bearer Token Required)
+// Registra/atualiza o token FCM do dispositivo do usuário logado.
+app.post('/api/users/fcm-token', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  const { fcm_token } = req.body ?? {};
+  const userId = req.user!.id;
+
+  if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length > 512) {
+    res.status(400).json({ error: 'fcm_token inválido.', message: 'fcm_token inválido.' });
+    return;
+  }
 
   try {
-    // 1. Insert new entry in chamegos table
+    // Um token pertence a um único usuário (evita push para a conta errada após troca de login no mesmo aparelho)
+    await pool.query('UPDATE users SET fcm_token = NULL WHERE fcm_token = $1 AND id <> $2', [fcm_token, userId]);
+    await pool.query('UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2', [fcm_token, userId]);
+    log.success('FCM', `Token FCM registrado para o usuário ${userId}`);
+    res.status(200).json({ status: 'success' });
+  } catch (error: any) {
+    log.error('FCM', `Erro ao salvar token FCM do usuário ${userId}`, error);
+    res.status(500).json({ error: 'Erro ao salvar o token de notificação.', message: 'Erro ao salvar o token de notificação.' });
+  }
+});
+
+// DELETE /api/users/fcm-token  (Bearer Token Required) — chamar no logout
+app.delete('/api/users/fcm-token', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.id;
+  try {
+    await pool.query('UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1', [userId]);
+    res.status(200).json({ status: 'success' });
+  } catch (error: any) {
+    log.error('FCM', `Erro ao remover token FCM do usuário ${userId}`, error);
+    res.status(500).json({ error: 'Erro ao remover o token de notificação.', message: 'Erro ao remover o token de notificação.' });
+  }
+});
+
+// POST /api/notifications/emote  (Bearer Token Required)
+app.post('/api/notifications/emote', authenticateToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  const { couple_id, sender_name, emote, text, timestamp: ts } = req.body ?? {};
+  const userId = req.user!.id;
+  log.info('EMOTE', `Emote recebido de ${sender_name} (${userId})`, { couple_id, emote, text });
+
+  if (!couple_id || !emote) {
+    res.status(400).json({ error: 'couple_id e emote são obrigatórios.', message: 'couple_id e emote são obrigatórios.' });
+    return;
+  }
+
+  try {
+    // O remetente é sempre o usuário autenticado, e precisa pertencer ao casal informado
+    const me = await pool.query('SELECT couple_id, name FROM users WHERE id = $1', [userId]);
+    if (!me.rows[0]?.couple_id || me.rows[0].couple_id !== couple_id) {
+      res.status(403).json({ error: 'Você não pertence a este casal.', message: 'Você não pertence a este casal.' });
+      return;
+    }
+    const senderName: string = sender_name || me.rows[0].name || 'Seu amor';
+    const messageText: string = text || emote;
+
+    // 1. Salva o chamego
     const createdAt = ts || new Date().toISOString();
     await pool.query(
       'INSERT INTO chamegos (couple_id, sender_id, text, type, created_at) VALUES ($1, $2, $3, $4, $5)',
-      [couple_id, sender_id, text, emote, createdAt]
+      [couple_id, userId, messageText, emote, createdAt]
     );
-    log.info('EMOTE', `Chamego salvo no DB (couple: ${couple_id})`);
 
-    // 2. Find the partner's user ID
+    // 2. Descobre o parceiro
     const coupleResult = await pool.query('SELECT user1_id, user2_id FROM couples WHERE id = $1', [couple_id]);
     const couple = coupleResult.rows[0];
+    const partnerId: string | null = couple ? (couple.user1_id === userId ? couple.user2_id : couple.user1_id) : null;
 
-    if (couple) {
-      const partnerId = couple.user1_id === sender_id ? couple.user2_id : couple.user1_id;
-      log.info('EMOTE', `Parceiro identificado: ${partnerId}`);
+    // 3. Broadcast em tempo real para a sala do casal
+    io.to(`couple:${couple_id}`).emit('receive_emote', {
+      event: 'receive_emote',
+      id: req.body.id || undefined,
+      couple_id,
+      sender_id: userId,
+      sender_name: senderName,
+      emote,
+      text: messageText,
+      timestamp: createdAt,
+    });
 
-      // 3. Broadcast real-time emote_received event via WebSocket to the couple room
-      io.to(`couple:${couple_id}`).emit('receive_emote', {
-        event: 'receive_emote',
-        id: req.body.id || undefined,
-        couple_id,
-        sender_id,
-        sender_name,
-        emote,
-        text,
-        timestamp: createdAt,
+    // 4. Push FCM (best-effort: falha no push não derruba a requisição)
+    let push: { sent: boolean; reason?: string } = { sent: false, reason: 'no_partner' };
+    if (partnerId) {
+      push = await sendPushToUser(pool, partnerId, {
+        title: `❤️ ${senderName} te mandou um chamego!`,
+        body: messageText,
+        data: {
+          type: String(emote),
+          couple_id: String(couple_id),
+          sender_id: userId,
+          sender_name: String(senderName),
+          text: String(messageText),
+          timestamp: String(createdAt),
+        },
       });
-      log.info('EMOTE', `Evento emote_received emitido para sala couple:${couple_id}`);
-
-      // 4. If FCM configured, send push notification to partner's device
-      if (partnerId && process.env.FCM_SERVER_KEY && process.env.FCM_SERVER_KEY !== 'optional_fcm_server_key_for_push_notifications') {
-        const partnerResult = await pool.query('SELECT fcm_token FROM users WHERE id = $1', [partnerId]);
-        const partnerFcmToken = partnerResult.rows[0]?.fcm_token;
-        if (partnerFcmToken) {
-          // FCM push notification placeholder
-          log.info('FCM', `Push notification enviado para ${partnerId}: ❤️ ${sender_name} te mandou um chamego!`);
-        } else {
-          log.warn('FCM', `Parceiro ${partnerId} sem fcm_token registrado`);
-        }
-      }
-    } else {
-      log.warn('EMOTE', `Casal ${couple_id} não encontrado`);
+      log.info('FCM', `Push para ${partnerId}: ${push.sent ? 'enviado' : `não enviado (${push.reason})`}`);
     }
 
     log.success('EMOTE', `Emote processado com sucesso`);
     res.status(200).json({
       status: 'success',
-      message: 'Notification sent to partner successfully.',
+      message: 'Emote processed.',
+      push_sent: push.sent,
       sent_at: new Date().toISOString(),
     });
   } catch (error: any) {
-    log.error('EMOTE', `Erro ao processar emote de ${sender_id}`, error);
-    res.status(500).json({ error: 'Não foi possível enviar o chamego no momento.' });
+    log.error('EMOTE', `Erro ao processar emote de ${userId}`, error);
+    res.status(500).json({ error: 'Não foi possível enviar o chamego no momento.', message: 'Não foi possível enviar o chamego no momento.' });
   }
 });
 
@@ -796,6 +847,11 @@ app.post('/api/sync', authenticateToken, async (req: AuthRequest, res: Response)
 });
 
 // ──────────────────────────────────────────────
+// REST CRUD: outings, memories, gifts, special-dates
+// ──────────────────────────────────────────────
+registerCrudRoutes(app, pool, authenticateToken as any);
+
+// ──────────────────────────────────────────────
 // WebSocket Gateway  (ws://<host>:3000/ws)
 // ──────────────────────────────────────────────
 io.on('connection', (socket: Socket) => {
@@ -874,6 +930,7 @@ server.listen(PORT, async () => {
   log.success('SERVER', `Chamego server rodando em http://localhost:${PORT}`);
   log.info('SERVER', `Ambiente: DATABASE_URL=${process.env.DATABASE_URL ? '✔ definido' : '✖ ausente'}, JWT_SECRET=${process.env.JWT_SECRET ? '✔ definido' : '✖ ausente'}`);
   await initDb();
+  initFcm();
 });
 
 const gracefulShutdown = async (signal: string) => {

@@ -1,9 +1,12 @@
-import { Pool } from 'pg';
+import { Pool, types } from 'pg';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+// NUMERIC/DECIMAL (oid 1700) -> JS number instead of string (cost, price)
+types.setTypeParser(1700, (v: string) => parseFloat(v));
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,

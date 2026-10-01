@@ -124,3 +124,8 @@ dist
 
 # Windows
 Thumbs.db
+
+# Firebase service account (NUNCA commitar)
+serviceAccountKey.json
+*firebase-adminsdk*.json
+.env.example.local
