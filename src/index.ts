@@ -852,6 +852,11 @@ app.post('/api/sync', authenticateToken, async (req: AuthRequest, res: Response)
 registerCrudRoutes(app, pool, authenticateToken as any);
 
 // ──────────────────────────────────────────────
+// REST CRUD: outings, memories, gifts, special-dates
+// ──────────────────────────────────────────────
+registerCrudRoutes(app, pool, authenticateToken as any);
+
+// ──────────────────────────────────────────────
 // WebSocket Gateway  (ws://<host>:3000/ws)
 // ──────────────────────────────────────────────
 io.on('connection', (socket: Socket) => {
