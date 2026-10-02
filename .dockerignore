@@ -4,3 +4,8 @@ dist
 serviceAccountKey.json
 *firebase-adminsdk*.json
 .git
+.idea
+test
+*.log
+stack.env
+.env.*

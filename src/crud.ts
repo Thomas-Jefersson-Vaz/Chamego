@@ -1,250 +1,82 @@
-import { Express, Request, Response, NextFunction, RequestHandler } from 'express';
-import { Pool } from 'pg';
-
-/**
- * REST CRUD for the couple-scoped entities described in Guide.md:
- *   /api/outings, /api/memories, /api/gifts, /api/special-dates
- *
- * Rules:
- *  - Every route requires a Bearer token (the `auth` middleware passed in).
- *  - Data is always scoped to the authenticated user's couple. `couple_id` in the
- *    request body is ignored, so a user can never read/write another couple's data.
- *  - DELETE is a soft delete (is_deleted = TRUE, updated_at = NOW()) so that the
- *    /api/sync endpoint still propagates the deletion to the partner's device.
- *  - POST is an idempotent upsert on the client-generated `id` (offline-first
- *    clients may retry the same request).
- */
-
-interface EntityConfig {
-  route: string;
-  table: string;
-  /** Columns a client may set (besides id / couple_id / timestamps). */
-  fields: string[];
-  /** Columns that must be present on create. */
-  required: string[];
-  /** Columns stored as JSONB. */
-  json?: string[];
-  /** Column automatically filled with the authenticated user id (gifts). */
-  creatorColumn?: string;
-}
-
-const ENTITIES: EntityConfig[] = [
-  {
-    route: 'outings',
-    table: 'outings',
-    fields: ['title', 'location', 'date', 'category', 'cost', 'status', 'rating', 'notify_option'],
-    required: ['title'],
-  },
-  {
-    route: 'memories',
-    table: 'memories',
-    fields: ['title', 'date', 'description', 'mood', 'photo_urls'],
-    required: ['title', 'date'],
-    json: ['photo_urls'],
-  },
-  {
-    route: 'gifts',
-    table: 'gifts',
-    fields: ['type', 'title', 'store_url', 'price', 'occasion'],
-    required: ['title'],
-    creatorColumn: 'creator_id',
-  },
-  {
-    route: 'special-dates',
-    table: 'special_dates',
-    fields: ['title', 'date', 'repeat_option', 'notify_option'],
-    required: ['title', 'date'],
-  },
-];
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function fail(res: Response, status: number, msg: string): void {
-  res.status(status).json({ error: msg, message: msg });
-}
-
-/** pg returns NUMERIC as string; the API contract uses numbers. */
-function serialize(row: any): any {
-  if (!row) return row;
-  const out = { ...row };
-  for (const k of ['cost', 'price']) {
-    if (out[k] !== null && out[k] !== undefined) out[k] = Number(out[k]);
-  }
-  return out;
-}
-
-export function registerCrudRoutes(app: Express, pool: Pool, auth: RequestHandler): void {
-  /** Resolve the couple of the authenticated user; sends a 400 and returns null if none. */
-  async function getCoupleId(req: Request, res: Response): Promise<string | null> {
-    const userId = (req as any).user.id as string;
-    const r = await pool.query('SELECT couple_id FROM users WHERE id = $1', [userId]);
-    const coupleId = r.rows[0]?.couple_id as string | undefined;
-    if (!coupleId) {
-      fail(res, 400, 'Usuário não possui casal associado.');
-      return null;
+import { PoolClient } from 'pg';
+import { randomUUID } from 'node:crypto';
+import { ApiError, object, text, date, uuid, choice } from './validation';
+export const entities: Record<string, string[]> = {
+  chamegos: ['text','type','created_at'],
+  outings: ['title','location','date','category','cost','status','rating','notify_option','is_deleted'],
+  memories: ['title','date','description','mood','photo_urls','is_deleted'],
+  gifts: ['title','type','store_url','price','occasion','is_deleted'],
+  special_dates: ['title','date','repeat_option','notify_option','is_deleted'],
+};
+export function validateRecord(entity: string, value: unknown, partial = false): Record<string, any> {
+  if (!Object.hasOwn(entities,entity)) throw new ApiError(400, 'Recurso invalido.');
+  const body = object(value);
+  if (body.id !== undefined) uuid(body.id);
+  if (body.couple_id !== undefined) uuid(body.couple_id);
+  const data: Record<string, any> = {};
+  for (const key of entities[entity]) {
+    if (body[key] === undefined) continue;
+    const v = body[key];
+    if (key === 'is_deleted') {
+      if (typeof v !== 'boolean') throw new ApiError(400, 'is_deleted deve ser booleano.');
+      data[key] = v;
+    } else if (['cost','price','rating'].includes(key)) {
+      if (v !== null && (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 99999999.99 || (key === 'rating' && (!Number.isInteger(v) || v > 5)))) throw new ApiError(400, 'Valor numerico invalido.');
+      data[key] = v;
+    } else if (['date','created_at'].includes(key)) {
+      data[key] = v === null && entity === 'outings' ? null : date(v);
+    } else if (key === 'photo_urls') {
+      if (!Array.isArray(v) || v.length > 20 || v.some(x => typeof x !== 'string' || x.length > 2048 || !/^https:\/\//.test(x))) throw new ApiError(400, 'Fotos invalidas.');
+      data[key] = JSON.stringify(v);
+    } else if (key === 'status') data[key] = choice(v,['planned','idea','done']);
+    else if (key === 'repeat_option') data[key] = choice(v,['none','monthly','yearly']);
+    else if (key === 'notify_option') data[key] = v === null ? null : choice(v,['none','day','1day_before','1week_before']);
+    else if (key === 'type' && entity === 'gifts') data[key] = choice(v,['wish','secret','given']);
+    else if (key === 'store_url') {
+      if (v !== null && (typeof v !== 'string' || v.length > 2048 || !/^https?:\/\//.test(v))) throw new ApiError(400, 'Link invalido.');
+      data[key] = v;
+    } else {
+      const required = ['title','text','type','category','mood'].includes(key);
+      if (v === null && !required) data[key] = null;
+      else if (v === '' && key === 'description') data[key] = '';
+      else data[key] = text(v, ['text','description'].includes(key) ? 4000 : key === 'type' ? 50 : ['category','mood','occasion'].includes(key) ? 100 : 255);
     }
-    return coupleId;
   }
-
-  /** Pick whitelisted fields from body; undefined values are skipped. */
-  function pickFields(cfg: EntityConfig, body: any): Record<string, any> {
-    const out: Record<string, any> = {};
-    for (const f of cfg.fields) {
-      if (body[f] === undefined) continue;
-      out[f] = cfg.json?.includes(f) ? JSON.stringify(body[f] ?? []) : body[f];
+  if (!partial) {
+    for (const key of entity === 'chamegos' ? ['text','type'] : ['memories','special_dates'].includes(entity) ? ['title','date'] : ['title']) {
+      if (data[key] === undefined) throw new ApiError(400, `${key} e obrigatorio.`);
     }
-    return out;
   }
-
-  const wrap =
-    (fn: (req: Request, res: Response) => Promise<void>, tag: string): RequestHandler =>
-    async (req: Request, res: Response, _next: NextFunction) => {
-      try {
-        await fn(req, res);
-      } catch (err: any) {
-        console.error(`[CRUD:${tag}]`, err);
-        if (err?.code === '22P02' || err?.code === '22007' || err?.code === '22008') {
-          // invalid uuid / date / numeric text representation
-          fail(res, 400, 'Dados inválidos na requisição.');
-        } else {
-          fail(res, 500, 'Erro interno do servidor.');
-        }
-      }
-    };
-
-  for (const cfg of ENTITIES) {
-    const base = `/api/${cfg.route}`;
-
-    // ── GET /api/<entity> ──
-    app.get(
-      base,
-      auth,
-      wrap(async (req, res) => {
-        const coupleId = await getCoupleId(req, res);
-        if (!coupleId) return;
-        const r = await pool.query(
-          `SELECT * FROM ${cfg.table}
-            WHERE couple_id = $1 AND is_deleted = FALSE
-            ORDER BY created_at DESC`,
-          [coupleId]
-        );
-        res.status(200).json(r.rows.map(serialize));
-      }, cfg.route)
-    );
-
-    // ── POST /api/<entity> (idempotent upsert on client id) ──
-    app.post(
-      base,
-      auth,
-      wrap(async (req, res) => {
-        const userId = (req as any).user.id as string;
-        const coupleId = await getCoupleId(req, res);
-        if (!coupleId) return;
-
-        const body = req.body ?? {};
-        for (const f of cfg.required) {
-          if (body[f] === undefined || body[f] === null || body[f] === '') {
-            return fail(res, 400, `${f} é obrigatório.`);
-          }
-        }
-        if (body.id !== undefined && !UUID_RE.test(String(body.id))) {
-          return fail(res, 400, 'id inválido (esperado UUID).');
-        }
-
-        const data = pickFields(cfg, body);
-        if (cfg.creatorColumn) data[cfg.creatorColumn] = userId;
-
-        const cols: string[] = ['couple_id'];
-        const vals: any[] = [coupleId];
-        if (body.id) {
-          cols.push('id');
-          vals.push(body.id);
-        }
-        for (const [k, v] of Object.entries(data)) {
-          cols.push(k);
-          vals.push(v);
-        }
-        const placeholders = vals.map((_, i) => `$${i + 1}`).join(', ');
-
-        // On conflict only update non-identity columns, and only if the row belongs to this couple.
-        const updatable = Object.keys(data).filter((k) => k !== cfg.creatorColumn);
-        const setClause = [...updatable.map((k) => `${k} = EXCLUDED.${k}`), 'is_deleted = FALSE', 'updated_at = NOW()'].join(', ');
-
-        const r = await pool.query(
-          `INSERT INTO ${cfg.table} (${cols.join(', ')})
-           VALUES (${placeholders})
-           ON CONFLICT (id) DO UPDATE SET ${setClause}
-             WHERE ${cfg.table}.couple_id = EXCLUDED.couple_id
-           RETURNING *, (xmax = 0) AS _inserted`,
-          vals
-        );
-
-        if (r.rows.length === 0) {
-          // id exists but belongs to another couple
-          return fail(res, 409, 'Conflito: id já está em uso.');
-        }
-        const { _inserted, ...row } = r.rows[0];
-        res.status(_inserted ? 201 : 200).json(serialize(row));
-      }, cfg.route)
-    );
-
-    // ── PUT /api/<entity>/:id ──
-    app.put(
-      `${base}/:id`,
-      auth,
-      wrap(async (req, res) => {
-        const id = String(req.params.id);
-        if (!UUID_RE.test(id)) return fail(res, 400, 'id inválido (esperado UUID).');
-        const coupleId = await getCoupleId(req, res);
-        if (!coupleId) return;
-
-        const body = req.body ?? {};
-        for (const f of cfg.required) {
-          if (body[f] !== undefined && (body[f] === null || body[f] === '')) {
-            return fail(res, 400, `${f} não pode ser vazio.`);
-          }
-        }
-
-        const data = pickFields(cfg, body);
-        if (typeof body.is_deleted === 'boolean') data.is_deleted = body.is_deleted;
-
-        const keys = Object.keys(data);
-        if (keys.length === 0) return fail(res, 400, 'Nenhum campo válido para atualizar.');
-
-        const sets = keys.map((k, i) => `${k} = $${i + 1}`);
-        sets.push('updated_at = NOW()');
-        const vals = keys.map((k) => data[k]);
-
-        const r = await pool.query(
-          `UPDATE ${cfg.table} SET ${sets.join(', ')}
-            WHERE id = $${keys.length + 1} AND couple_id = $${keys.length + 2}
-            RETURNING *`,
-          [...vals, id, coupleId]
-        );
-        if (r.rows.length === 0) return fail(res, 404, 'Registro não encontrado.');
-        res.status(200).json(serialize(r.rows[0]));
-      }, cfg.route)
-    );
-
-    // ── DELETE /api/<entity>/:id (soft delete) ──
-    app.delete(
-      `${base}/:id`,
-      auth,
-      wrap(async (req, res) => {
-        const id = String(req.params.id);
-        if (!UUID_RE.test(id)) return fail(res, 400, 'id inválido (esperado UUID).');
-        const coupleId = await getCoupleId(req, res);
-        if (!coupleId) return;
-
-        const r = await pool.query(
-          `UPDATE ${cfg.table} SET is_deleted = TRUE, updated_at = NOW()
-            WHERE id = $1 AND couple_id = $2
-            RETURNING id`,
-          [id, coupleId]
-        );
-        if (r.rows.length === 0) return fail(res, 404, 'Registro não encontrado.');
-        res.status(200).json({ status: 'success', id });
-      }, cfg.route)
-    );
+  return data;
+}
+export async function membership(client: PoolClient, userId: string): Promise<string> {
+  const r = await client.query(`SELECT u.couple_id FROM users u JOIN couples c ON c.id=u.couple_id
+    WHERE u.id=$1 AND c.ended_at IS NULL AND (c.user1_id=u.id OR c.user2_id=u.id)`, [userId]);
+  if (!r.rows[0]) throw new ApiError(403, 'Usuario nao possui casal ativo.');
+  return r.rows[0].couple_id;
+}
+export async function writeRecord(client: PoolClient, entity: string, body: Record<string, any>, userId: string, coupleId: string, partial = false) {
+  const data = validateRecord(entity, body, partial);
+  const id = body.id ? uuid(body.id) : randomUUID();
+  if (body.couple_id && uuid(body.couple_id) !== coupleId) throw new ApiError(403, 'Voce nao pertence a este casal.');
+  const existing = (await client.query(`SELECT * FROM ${entity} WHERE id=$1 FOR UPDATE`, [id])).rows[0];
+  if (existing && (existing.couple_id !== coupleId || (entity === 'gifts' && existing.type === 'secret' && existing.creator_id !== userId))) throw new ApiError(409, 'Registro indisponivel.');
+  if (entity === 'gifts' && existing && data.type === 'secret' && existing.creator_id !== userId) throw new ApiError(403, 'Somente o criador pode tornar o presente secreto.');
+  if (partial && !existing) throw new ApiError(404, 'Registro nao encontrado.');
+  if (entity === 'chamegos' && existing) {
+    if (existing.sender_id !== userId || existing.text !== data.text || existing.type !== data.type) throw new ApiError(409, 'ID de mensagem ja utilizado.');
+    return { row: existing, inserted: false };
   }
+  if (existing) {
+    const keys = Object.keys(data);
+    if (!keys.length) throw new ApiError(400, 'Nenhum campo valido.');
+    const sets = keys.map((k,i) => `${k}=$${i+1}`);
+    if (entity !== 'chamegos') sets.push('updated_at=NOW()');
+    return { row: (await client.query(`UPDATE ${entity} SET ${sets.join(',')} WHERE id=$${keys.length+1} RETURNING *`, [...Object.values(data),id])).rows[0], inserted: false };
+  }
+  const all: Record<string, any> = { id, couple_id: coupleId, ...data };
+  if (entity === 'gifts') all.creator_id = userId;
+  if (entity === 'chamegos') all.sender_id = userId;
+  const keys = Object.keys(all);
+  return { row: (await client.query(`INSERT INTO ${entity} (${keys.join(',')}) VALUES (${keys.map((_,i)=>`$${i+1}`).join(',')}) RETURNING *`,Object.values(all))).rows[0], inserted: true };
 }

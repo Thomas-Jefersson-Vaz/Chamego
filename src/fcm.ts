@@ -42,7 +42,7 @@ export function initFcm(): boolean {
     console.log(`[FCM] Firebase Admin inicializado (project: ${(sa as any).project_id ?? 'n/a'}).`);
     return true;
   } catch (err) {
-    console.error('[FCM] Falha ao inicializar Firebase Admin — push desativado:', err);
+    console.error('[FCM] Falha ao inicializar Firebase Admin — push desativado.');
     app = null;
     return false;
   }
@@ -71,9 +71,11 @@ export async function sendPushToUser(
 ): Promise<{ sent: boolean; reason?: string }> {
   if (!isFcmEnabled() || !app) return { sent: false, reason: 'fcm_disabled' };
 
+  let attemptedToken: string | null = null;
   try {
     const r = await pool.query('SELECT fcm_token FROM users WHERE id = $1', [userId]);
     const token: string | null = r.rows[0]?.fcm_token ?? null;
+    attemptedToken = token;
     if (!token) return { sent: false, reason: 'no_token' };
 
     await getMessaging(app).send({
@@ -96,11 +98,11 @@ export async function sendPushToUser(
       code === 'messaging/registration-token-not-registered' ||
       code === 'messaging/invalid-registration-token'
     ) {
-      await pool.query('UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1', [userId]).catch(() => {});
+      await pool.query('UPDATE users SET fcm_token = NULL, updated_at = NOW() WHERE id = $1 AND fcm_token = $2', [userId, attemptedToken]).catch(() => {});
       console.warn(`[FCM] Token inválido/expirado removido do usuário ${userId} (${code})`);
       return { sent: false, reason: 'token_invalid' };
     }
-    console.error(`[FCM] Erro ao enviar push para ${userId}:`, code ?? err);
+    console.error(JSON.stringify({event:'push_delivery_error',user_id:userId,code:code ?? 'unknown'}));
     return { sent: false, reason: 'send_error' };
   }
 }

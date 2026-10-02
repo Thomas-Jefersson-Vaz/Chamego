@@ -5,5 +5,21 @@ services:
     restart: always
     ports:
       - "34343:34343"
-    env_file:
-      - stack.env
+    environment:
+      NODE_ENV: production
+      PORT: "34343"
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in Portainer stack environment}
+      JWT_SECRET: ${JWT_SECRET:?Set a random JWT_SECRET of at least 32 characters}
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${FIREBASE_SERVICE_ACCOUNT_JSON:-}
+      REQUIRE_FCM: ${REQUIRE_FCM:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TRUST_PROXY: ${TRUST_PROXY:-}
+    init: true
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
