@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'node:http';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import bcrypt from 'bcrypt';
@@ -75,6 +75,16 @@ export function createApplication(db: Pool, secret: string) {
   }));
   app.get('/api/users/me',auth,route(async(req,res)=>res.json({user:safeUser((await db.query('SELECT * FROM users WHERE id=$1',[req.user!.id])).rows[0])})));
   app.get('/api/couples/me',auth,route(async(req,res)=>res.json(await transaction(db,c=>coupleProfile(c,req.user!.id)))));
+  async function inviteCode(c: import('pg').PoolClient): Promise<string> {
+    // Transactions share the advisory lock, so allocation cannot race.
+    const used = new Set((await c.query("SELECT code FROM couples WHERE code ~ '^AMOR-[0-9]{4}$'")).rows.map(r => r.code));
+    const start = randomInt(10000);
+    for (let n = 0; n < 10000; n++) {
+      const code = 'AMOR-' + ((start + n) % 10000).toString().padStart(4, '0');
+      if (!used.has(code)) return code;
+    }
+    throw new ApiError(503, 'Convites indisponiveis no momento.');
+  }
   app.post('/api/couples/invite',auth,limit,route(async(req,res)=>{
     const result=await transaction(db,async c=>{
       const me=(await c.query('SELECT * FROM users WHERE id=$1 FOR UPDATE',[req.user!.id])).rows[0];
@@ -82,12 +92,13 @@ export function createApplication(db: Pool, secret: string) {
         const current=await coupleProfile(c,me.id);
         if(current.couple?.user2_id) return current;
         if(current.couple) {
-          await c.query("UPDATE couples SET code=$1,invite_expires_at=NOW()+INTERVAL '7 days',updated_at=NOW() WHERE id=$2",['AMOR-'+randomBytes(6).toString('hex').toUpperCase(),current.couple.id]);
+          if (/^AMOR-[0-9]{4}$/.test(current.couple.code) && current.couple.invite_expires_at && new Date(current.couple.invite_expires_at) > new Date()) return current;
+          await c.query("UPDATE couples SET code=$1,invite_expires_at=NOW()+INTERVAL '7 days',updated_at=NOW() WHERE id=$2",[await inviteCode(c),current.couple.id]);
           return coupleProfile(c,me.id);
         }
         throw new ApiError(409,'Relacionamento inconsistente. Contate o suporte.');
       }
-      const couple=(await c.query("INSERT INTO couples(code,user1_id,start_date,invite_expires_at) VALUES($1,$2,NOW(),NOW()+INTERVAL '7 days') RETURNING *",['AMOR-'+randomBytes(6).toString('hex').toUpperCase(),me.id])).rows[0];
+      const couple=(await c.query("INSERT INTO couples(code,user1_id,start_date,invite_expires_at) VALUES($1,$2,NOW(),NOW()+INTERVAL '7 days') RETURNING *",[await inviteCode(c),me.id])).rows[0];
       await c.query('UPDATE users SET couple_id=$1,updated_at=NOW() WHERE id=$2',[couple.id,me.id]);
       return coupleProfile(c,me.id);
     });

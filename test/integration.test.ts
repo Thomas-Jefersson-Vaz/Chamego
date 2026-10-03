@@ -231,3 +231,19 @@ test('orphaned historical invitations cannot create a one-sided relationship',as
   assert.equal((await db.query('SELECT couple_id FROM users WHERE id=$1',[b.user.id])).rows[0].couple_id,null);
   assert.equal((await db.query('SELECT user2_id FROM couples WHERE id=$1',[invite.id])).rows[0].user2_id,null);
 });
+
+
+test('short invitation codes are unique, stable and refresh expired legacy codes', async()=>{
+  const a=await user(),b=await user();
+  const first=(await request('POST','/api/couples/invite',a.token,{})).body.couple;
+  assert.match(first.code,/^AMOR-[0-9]{4}$/);
+  const again=(await request('POST','/api/couples/invite',a.token,{})).body.couple;
+  assert.equal(again.code,first.code);
+  const other=(await request('POST','/api/couples/invite',b.token,{})).body.couple;
+  assert.notEqual(other.code,first.code);
+  await db.query("UPDATE couples SET code='AMOR-ABCDEF123456',invite_expires_at=NOW()-INTERVAL '1 day' WHERE id=$1",[first.id]);
+  const renewed=(await request('POST','/api/couples/invite',a.token,{})).body.couple;
+  assert.match(renewed.code,/^AMOR-[0-9]{4}$/);
+  assert.equal(renewed.id,first.id);
+  assert.equal((await request('POST','/api/couples/pair',b.token,{code:renewed.code})).status,200);
+});

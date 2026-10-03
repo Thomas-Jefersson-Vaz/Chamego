@@ -76,3 +76,9 @@ Stop new traffic before rollback and preserve a fresh backup. Account for protoc
 Monitor readiness, 5xx responses, sync conflicts and restarts. `/health` is liveness; `/ready` checks PostgreSQL. Push/socket delivery is best effort after durable message persistence; clients can retrieve committed messages through sync after notification failure. Only one FCM token per user is retained. A durable push retry queue and multi-device push fan-out are outside this release.
 
 See [the API guide](Chamego_API_Client_Guide.md) and the client project's `PRODUCTION.md` for signing/device acceptance.
+
+## Chat notifications and short invitations update
+
+Deploy the updated Flutter APK on both phones together with this backend. Android push delivery now sends high-priority data messages; the updated app renders grouped notifications with a monochrome icon in foreground and background. Older APKs will not display these data messages in the background. Live Firebase/device checks remain required.
+
+New invitation codes use `AMOR-0000`, are allocated under the shared transaction lock, and remain stable until expired. Existing long invitations stay valid until refreshed by their owner. The four-digit namespace has 10,000 codes; allocation returns 503 if all codes are occupied, without changing existing relationships.

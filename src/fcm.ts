@@ -80,15 +80,14 @@ export async function sendPushToUser(
 
     await getMessaging(app).send({
       token,
-      notification: { title: payload.title, body: payload.body },
-      data: payload.data ?? {},
+      // Android renders data messages locally so foreground/background share grouping.
+      data: { ...payload.data, title: payload.title, body: payload.body },
       android: {
         priority: 'high',
-        notification: { sound: 'default', channelId: 'chamegos_emotes_channel' },
       },
       apns: {
         headers: { 'apns-priority': '10' },
-        payload: { aps: { sound: 'default' } },
+        payload: { aps: { sound: 'default', alert: { title: payload.title, body: payload.body } } },
       },
     });
     return { sent: true };

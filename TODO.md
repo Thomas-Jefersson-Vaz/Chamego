@@ -4,6 +4,18 @@ Updated: 2026-10-02. Covers the backend in `C:\Users\thoma\IdeaProjects\Chamego`
 
 Checked items are implemented. Implementation does not imply that deployment or device acceptance testing has passed. Code hardening and local verification are complete. Production rollout still requires the owner steps below; neither project has been deployed by this agent. Docker must not be run locally. The owner will commit the changes and restart the server when the remaining work is complete.
 
+## Requested usability fixes — 2026-10-02
+
+- [x] Trigger synchronization after every committed local pending write, including memories, outings, gifts and dates. Queue another pass when a write occurs during sync; preserve pending writes offline.
+- [x] Count all visible outings in Nosso Mundo, regardless of status.
+- [x] Generate unique `AMOR-0000` invitations and reuse valid codes when reopening the pairing screen. Existing long codes refresh when their owner requests a new invitation.
+- [x] Connect realtime and synchronization on the pairing screen; update the inviter's screen when the partner joins.
+- [x] Use a transparent monochrome heart notification resource without the launcher border.
+- [x] Group Android chat/chamego notifications with a summary; render Android data pushes locally in the background using the cached authenticated session.
+- [x] Regression checks: 18 backend integration tests and 26 Flutter tests passed; Flutter analysis clean; APK built using `https://chamego.mikrolabs.dev/api`.
+- [ ] Install the new APK on both phones and redeploy the backend together. Android push delivery now uses data messages; old APKs do not render those in the background.
+- [ ] Check pairing and grouped notifications on real devices, including background/closed app and notification taps.
+
 ## Backend — implemented
 
 - [x] Validate production JWT configuration; enforce authenticated account identity and active couple membership.
@@ -43,7 +55,14 @@ Checked items are implemented. Implementation does not imply that deployment or 
 - [x] Flag sync HTTP 401 responses as requiring login and repair the sync completion text.
 - [x] Add 23 tests covering API failures, local migrations, outbox durability, acknowledgements, session isolation, privacy, tombstones, recovery, reminders and sync protocol.
 
-## Verification already completed
+## Reported deployment issue — chat/chamego delivery
+
+- [x] Review reported startup logs: Firebase initialized and readiness returns 200; supplied logs show no client API requests.
+- [x] Check client endpoint configuration: debug builds without `API_BASE_URL` default to emulator-only `http://10.0.2.2:34343/api`; backend environment variables do not configure APK endpoints.
+- [ ] Confirm the installed APK build and the actual API URL reachable from both phones; rebuild with that URL if needed.
+- [ ] Verify phone access, authenticated `/api/users/me` and `/api/sync` requests, couple membership, realtime delivery and FCM on both devices.
+
+## Local verification completed before deployment
 
 - [x] Backend TypeScript check and compiled build passed, including the recovery endpoint changes.
 - [x] All 17 backend integration tests passed, including existing-database migration, orphaned invitation rejection, token-specific revocation, recovery, socket revocation, privacy transitions, pagination and rollback.
@@ -108,9 +127,9 @@ Checked items are implemented. Implementation does not imply that deployment or 
 
 | Project | Checks | Result |
 | --- | --- | --- |
-| Backend | TypeScript, compiled build, native PostgreSQL integration tests | Passed; 17 tests |
+| Backend | TypeScript, compiled build, native PostgreSQL integration tests | Passed; 18 tests |
 | Backend | `npm audit --omit=dev` | 0 vulnerabilities |
-| Client | `flutter analyze`, `flutter test` | No analysis issues; 23 tests passed |
+| Client | `flutter analyze`, `flutter test` | No analysis issues; 26 tests passed |
 | Client | `flutter build apk --debug --no-pub` | Passed |
 | Release/server/device | Signed build, live migrations, HTTPS/FCM/device smoke tests | Pending owner configuration and rollout |
 
