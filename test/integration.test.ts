@@ -6,12 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { Pool, PoolConfig } from 'pg';
-import EmbeddedPostgres from 'embedded-postgres';
+import { TestPostgres } from './test-postgres';
 import { io as connectSocket } from 'socket.io-client';
 import { createApplication } from '../src/index';
 import { initDb, transaction } from '../src/db';
 
-let postgres: EmbeddedPostgres;
+let postgres: TestPostgres;
 let db: Pool;
 let testConnection: PoolConfig;
 let runtime: ReturnType<typeof createApplication>;
@@ -22,21 +22,36 @@ async function freePort() {
   const port=(s.address() as net.AddressInfo).port;await new Promise<void>(r=>s.close(()=>r()));return port;
 }
 before(async()=>{
+  // Tests never use developer/production Firebase credentials.
+  process.env.FIREBASE_SERVICE_ACCOUNT_JSON='';
+  process.env.FIREBASE_SERVICE_ACCOUNT_PATH='';
   const port=await freePort();
-  postgres=new EmbeddedPostgres({databaseDir:await fs.mkdtemp(path.join(os.tmpdir(),'chamego-test-')),port,user:'test',password:randomUUID(),persistent:false,onLog:()=>{},onError:()=>{},postgresFlags:['-h','127.0.0.1']});
-  await postgres.initialise();await postgres.start();
-  const client=postgres.getPgClient();await client.connect();
-  const config=client.connectionParameters;
-  testConnection={host:'127.0.0.1',port,user:config.user,password:config.password,database:config.database,max:8};
-  db=new Pool(testConnection);
-  await client.end();await initDb(db);
-}, {timeout:60000});
+  const password=randomUUID();
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'chamego-test-'));
+  const logs:string[]=[];
+  const capture=(message:unknown)=>{logs.push(String(message).replaceAll(password,'[test password]'));if(logs.length>30)logs.shift();};
+  let phase='initialize temporary PostgreSQL';
+  postgres=new TestPostgres({databaseDir:directory,port,user:'test',password,persistent:false,onLog:capture,onError:capture,postgresFlags:['-h','127.0.0.1']});
+  try {
+    await postgres.initialise();phase='start temporary PostgreSQL';await postgres.start();
+    phase='connect to temporary PostgreSQL';
+    testConnection={host:'127.0.0.1',port,user:'test',password,database:'postgres',max:8,ssl:false,connectionTimeoutMillis:5000};
+    db=new Pool(testConnection);await db.query('SELECT 1');
+    phase='apply migrations';await initDb(db);
+  } catch(error) {
+    const nativeLog=await fs.readFile(path.join(directory,'startup.log'),'utf8').catch(()=>'');
+    const reason=error instanceof Error?error.message:String(error ?? 'PostgreSQL exited before becoming ready');
+    console.error(`Test setup failed during ${phase}: ${reason.replaceAll(password,'[test password]')}`);
+    console.error([...logs,nativeLog.replaceAll(password,'[test password]')].filter(Boolean).join('\n'));
+    throw new Error(`Test setup failed during ${phase}: ${reason.replaceAll(password,'[test password]')}`);
+  }
+}, {timeout:90000});
 beforeEach(async()=>{
   runtime=createApplication(db,secret);
   await new Promise<void>(r=>runtime.server.listen(0,'127.0.0.1',r));
   base=`http://127.0.0.1:${(runtime.server.address() as net.AddressInfo).port}`;
 });
-afterEach(async()=>{runtime.dispose();await new Promise<void>(r=>runtime.io.close(()=>r()));});
+afterEach(async()=>{if(!runtime)return;runtime.dispose();await new Promise<void>(r=>runtime.io.close(()=>r()));});
 after(async()=>{await db?.end();if(postgres) await postgres.stop();});
 async function request(method:string,url:string,token?:string,data?:unknown) {
   const r=await fetch(base+url,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:data===undefined?undefined:JSON.stringify(data)});
@@ -246,4 +261,16 @@ test('short invitation codes are unique, stable and refresh expired legacy codes
   assert.match(renewed.code,/^AMOR-[0-9]{4}$/);
   assert.equal(renewed.id,first.id);
   assert.equal((await request('POST','/api/couples/pair',b.token,{code:renewed.code})).status,200);
+});
+
+
+test('explicit renewal invalidates the previous invitation and numeric codes pair', async()=>{
+  const a=await user(), b=await user();
+  const first=(await request('POST','/api/couples/invite',a.token,{})).body.couple;
+  const renewed=(await request('POST','/api/couples/invite',a.token,{renew:true})).body.couple;
+  assert.match(renewed.code,/^AMOR-[0-9]{4}$/);
+  assert.notEqual(renewed.code,first.code);
+  assert.equal(renewed.id,first.id);
+  assert.equal((await request('POST','/api/couples/pair',b.token,{code:first.code})).status,404);
+  assert.equal((await request('POST','/api/couples/pair',b.token,{code:renewed.code.slice(5)})).status,200);
 });

@@ -10,7 +10,7 @@ HTTP base: `https://YOUR_HOST/api`. Socket.IO: same HTTPS host, path `/ws`. Prot
 | `POST /auth/login` | `{email,password}` → `{user,token}` |
 | `GET /users/me` | `{user}` with current `couple_id` |
 | `GET /couples/me` | `{couple,partner}`, nullable |
-| `POST /couples/invite` | `{}` → `{couple,partner}`; creates/renews a seven-day invitation |
+| `POST /couples/invite` | `{renew?:boolean}` → `{couple,partner}`; creates/renews a seven-day invitation |
 | `POST /couples/pair` | `{code}` → `{couple,partner}` |
 | `POST /couples/unpair` | `{}` → `{status:"success"}` |
 | `POST /users/relationship-type` | `{relationship_type}` |
@@ -83,3 +83,7 @@ FCM carries canonical message and sender/couple metadata. Deduplicate foreground
 Errors: `{error:"message"}`. Statuses: 400 invalid request/cursor, 401 invalid/expired login, 403 membership denied, 404 missing record/route, 409 identity/invitation/privacy conflict, 426 obsolete protocol, 429 throttled, 500 internal failure. Only 401 requires login; preserve pending writes for failures. Authentication/invitation/message throttling is 30/minute per route/IP in this single-instance release.
 
 `GET /health` and `/ready` also exist at the host root. Readiness checks PostgreSQL and reports protocol 2. See [PRODUCTION.md](PRODUCTION.md) for coordinated rollout and operating limits.
+
+Invitation codes use `AMOR-0000`. `renew:true` replaces an existing pending code and renews its seven-day expiry; without it a valid code is reused. `/couples/pair` accepts the full code or the four-digit suffix. Completed couples cannot be renewed into pending invitations.
+
+Android pushes use data payloads with `recipient_id`, `couple_id`, canonical message `id`, sender metadata and display `title`/`body`. The native client receiver renders grouped notifications independently of Flutter startup. `push_delivery` server logs report `sent`/`reason` without tokens or message contents; `accepted` means FCM accepted the send, not that Android displayed it.

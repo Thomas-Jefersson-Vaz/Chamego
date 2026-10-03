@@ -16,6 +16,9 @@ export function text(value: unknown, max = 255): string {
 }
 export function date(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(value) || !Number.isFinite(Date.parse(value))) throw new ApiError(400, 'Data inválida.');
+  const calendar=value.slice(0,10);
+  const midnight=new Date(`${calendar}T00:00:00Z`);
+  if (!Number.isFinite(midnight.getTime()) || midnight.toISOString().slice(0,10)!==calendar) throw new ApiError(400, 'Data invalida.');
   return new Date(value).toISOString();
 }
 export function choice(value: unknown, values: string[]): string {

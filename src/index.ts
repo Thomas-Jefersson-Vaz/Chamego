@@ -86,13 +86,14 @@ export function createApplication(db: Pool, secret: string) {
     throw new ApiError(503, 'Convites indisponiveis no momento.');
   }
   app.post('/api/couples/invite',auth,limit,route(async(req,res)=>{
+    const renew = object(req.body ?? {}).renew === true;
     const result=await transaction(db,async c=>{
       const me=(await c.query('SELECT * FROM users WHERE id=$1 FOR UPDATE',[req.user!.id])).rows[0];
       if(me.couple_id) {
         const current=await coupleProfile(c,me.id);
         if(current.couple?.user2_id) return current;
         if(current.couple) {
-          if (/^AMOR-[0-9]{4}$/.test(current.couple.code) && current.couple.invite_expires_at && new Date(current.couple.invite_expires_at) > new Date()) return current;
+          if (!renew && /^AMOR-[0-9]{4}$/.test(current.couple.code) && current.couple.invite_expires_at && new Date(current.couple.invite_expires_at) > new Date()) return current;
           await c.query("UPDATE couples SET code=$1,invite_expires_at=NOW()+INTERVAL '7 days',updated_at=NOW() WHERE id=$2",[await inviteCode(c),current.couple.id]);
           return coupleProfile(c,me.id);
         }
@@ -113,7 +114,8 @@ export function createApplication(db: Pool, secret: string) {
     res.json(result);
   }));
   app.post('/api/couples/pair',auth,limit,route(async(req,res)=>{
-    const code=text(object(req.body).code,20).toUpperCase();
+    const supplied=text(object(req.body).code,20).toUpperCase();
+    const code=/^[0-9]{4}$/.test(supplied) ? 'AMOR-'+supplied : supplied;
     const result=await transaction(db,async c=>{
       const me=(await c.query('SELECT * FROM users WHERE id=$1 FOR UPDATE',[req.user!.id])).rows[0];
       const couple=(await c.query('SELECT * FROM couples WHERE code=$1 AND ended_at IS NULL FOR UPDATE',[code])).rows[0];
@@ -179,7 +181,10 @@ export function createApplication(db: Pool, secret: string) {
     const sender=safeUser((await db.query('SELECT * FROM users WHERE id=$1',[row.sender_id])).rows[0]);
     const event={id:row.id,couple_id:row.couple_id,sender_id:row.sender_id,sender_name:sender.name,emote:row.type,text:row.text,timestamp:row.created_at};
     io.to(`couple:${row.couple_id}`).emit('receive_emote',event);
-    if(profile.partner) await sendPushToUser(db,profile.partner.id,{title:`${sender.name} te mandou um chamego!`,body:row.text,data:Object.fromEntries(Object.entries({...event,type:row.type}).map(([k,v])=>[k,String(v)]))});
+    if(profile.partner) {
+      const push=await sendPushToUser(db,profile.partner.id,{title:`${sender.name} te mandou um chamego!`,body:row.text,data:Object.fromEntries(Object.entries({...event,type:row.type}).map(([k,v])=>[k,String(v)]))});
+      console.log(JSON.stringify({event:'push_delivery',message_id:row.id,sent:push.sent,reason:push.reason ?? 'accepted'}));
+    }
   }
   app.post('/api/notifications/emote',auth,limit,route(async(req,res)=>{
     const b=object(req.body);const result=await transaction(db,async c=>{

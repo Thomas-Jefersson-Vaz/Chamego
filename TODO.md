@@ -4,6 +4,13 @@ Updated: 2026-10-02. Covers the backend in `C:\Users\thoma\IdeaProjects\Chamego`
 
 Checked items are implemented. Implementation does not imply that deployment or device acceptance testing has passed. Code hardening and local verification are complete. Production rollout still requires the owner steps below; neither project has been deployed by this agent. Docker must not be run locally. The owner will commit the changes and restart the server when the remaining work is complete.
 
+## Server CI revalidation — 2026-10-02
+
+- [x] Start the temporary PostgreSQL cluster through pg_ctl on Windows, use explicit IPv4 connections and report preparation errors with startup logs.
+- [x] Validate with Node 22.23.3: all 22 backend tests passed, with no skipped tests. Type checking, production compilation and git diff checks passed locally.
+- [x] Add Ubuntu and Windows CI coverage; bound Unicode push previews and reject impossible calendar dates.
+- [ ] Commit/push and confirm the new GitHub Actions run. The hosted runner result has not yet been verified.
+
 ## Requested usability fixes — 2026-10-02
 
 - [x] Trigger synchronization after every committed local pending write, including memories, outings, gifts and dates. Queue another pass when a write occurs during sync; preserve pending writes offline.
@@ -15,6 +22,19 @@ Checked items are implemented. Implementation does not imply that deployment or 
 - [x] Regression checks: 18 backend integration tests and 26 Flutter tests passed; Flutter analysis clean; APK built using `https://chamego.mikrolabs.dev/api`.
 - [ ] Install the new APK on both phones and redeploy the backend together. Android push delivery now uses data messages; old APKs do not render those in the background.
 - [ ] Check pairing and grouped notifications on real devices, including background/closed app and notification taps.
+
+## Follow-up delivery and invitation fixes ? 2026-10-02
+
+- [x] Replace chat background Dart session restoration with a native Android receiver; persist only notification account/couple IDs and session expiration, and clear on logout/membership changes.
+- [x] Always post the group summary so active-notification query delays cannot leave standalone cards. Share IDs and icon between socket and native FCM notifications; preserve taps.
+- [x] Add native receiver regression tests without a Flutter engine, covering grouping, duplicate IDs, icon, account/couple isolation, expiration and logout.
+- [x] Generate a missing invitation automatically in the profile; create/renew directly from its action. Renew on the dedicated screen and show actual errors with retry.
+- [x] Fix matching membership synchronization invalidating an in-flight invitation response; keep account/couple-change guards.
+- [x] Accept `AMOR-1234` and `1234` in client/server; explicitly invalidate the prior code when renewing.
+- [x] Add recipient metadata and redacted push delivery outcome logs to distinguish no registered token from an accepted FCM send.
+- [x] Backend: 19 integration tests passed. Flutter: 28 tests passed and clean analysis. Android: 3 Robolectric tests passed.
+- [x] Final APK rebuilt with `https://chamego.mikrolabs.dev/api`; backend check/build and diff whitespace checks passed.
+- [ ] Reinstall the updated APK on both phones, open once to restore the native session, redeploy backend and verify live background delivery/grouping and invitation flow.
 
 ## Backend — implemented
 
@@ -127,9 +147,9 @@ Checked items are implemented. Implementation does not imply that deployment or 
 
 | Project | Checks | Result |
 | --- | --- | --- |
-| Backend | TypeScript, compiled build, native PostgreSQL integration tests | Passed; 18 tests |
+| Backend | TypeScript, compiled build, native PostgreSQL integration tests | Passed; 19 tests |
 | Backend | `npm audit --omit=dev` | 0 vulnerabilities |
-| Client | `flutter analyze`, `flutter test` | No analysis issues; 26 tests passed |
+| Client | `flutter analyze`, `flutter test` | No analysis issues; 28 Flutter tests plus 3 Android tests passed |
 | Client | `flutter build apk --debug --no-pub` | Passed |
 | Release/server/device | Signed build, live migrations, HTTPS/FCM/device smoke tests | Pending owner configuration and rollout |
 

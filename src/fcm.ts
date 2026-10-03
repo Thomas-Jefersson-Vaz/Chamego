@@ -59,8 +59,29 @@ export interface PushPayload {
   data?: Record<string, string>;
 }
 
+/** Limit previews by UTF-8 bytes; keep the full message in PostgreSQL/sync. */
+export function preview(value: string, bytes = 512): string {
+  if (Buffer.byteLength(value, 'utf8') <= bytes) return value;
+  let result = '', used = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, 'utf8');
+    if (used + size > bytes - 3) break;
+    result += character; used += size;
+  }
+  return result + '…';
+}
+export function pushContent(userId: string, payload: PushPayload) {
+  const data: Record<string,string> = {};
+  // Whitelist bounded metadata and avoid duplicating the entire message as text/body.
+  for (const key of ['id','couple_id','sender_id','sender_name','emote','type','timestamp']) {
+    if (payload.data?.[key] !== undefined) data[key] = preview(payload.data[key],256);
+  }
+  const title = preview(payload.title,256), body = preview(payload.body,512);
+  return {data:{...data,recipient_id:userId,title,body}, title, body};
+}
+
 /**
- * Sends a push to every device token stored for the user.
+ * Sends a push to the current device token stored for the user.
  * Never throws: push is best-effort and must not break the main request.
  * Tokens reported as invalid/unregistered by FCM are cleared from the DB.
  */
@@ -78,16 +99,17 @@ export async function sendPushToUser(
     attemptedToken = token;
     if (!token) return { sent: false, reason: 'no_token' };
 
+    const content=pushContent(userId,payload);
     await getMessaging(app).send({
       token,
       // Android renders data messages locally so foreground/background share grouping.
-      data: { ...payload.data, title: payload.title, body: payload.body },
+      data: content.data,
       android: {
         priority: 'high',
       },
       apns: {
         headers: { 'apns-priority': '10' },
-        payload: { aps: { sound: 'default', alert: { title: payload.title, body: payload.body } } },
+        payload: { aps: { sound: 'default', alert: { title: content.title, body: content.body } } },
       },
     });
     return { sent: true };
