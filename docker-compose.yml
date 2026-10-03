@@ -5,6 +5,8 @@ services:
     restart: always
     ports:
       - "34343:34343"
+    env_file:
+          - stack.env
     environment:
       NODE_ENV: production
       PORT: "34343"
